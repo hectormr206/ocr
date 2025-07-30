@@ -175,7 +175,7 @@ async def process_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid image file")
 
     # Preprocesar imagen
-    clean = preprocess_image_np(img)
+    clean, rotation_angle = preprocess_image_np(img)
 
     # Enviar imagen como PNG en la respuesta con información de rotación
     is_success, buffer = cv2.imencode('.png', clean)
