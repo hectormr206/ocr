@@ -46,19 +46,16 @@ def preprocess_image_np(img):
     else:
         warped = deskew
 
-    # 3) Binarización mejorada para OCR
+    # 3) Binarización optimizada para OCR
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     
-    # Aplicar filtro de ruido
-    denoised = cv2.fastNlMeansDenoising(warped_gray)
+    # Binarización adaptativa con parámetros optimizados
+    clean = cv2.adaptiveThreshold(warped_gray, 255,
+                                  cv2.ADAPTIVE_THRESH_MEAN_C,
+                                  cv2.THRESH_BINARY, 25, 10)
     
-    # Binarización adaptativa mejorada
-    clean = cv2.adaptiveThreshold(denoised, 255,
-                                  cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, 21, 11)
-    
-    # Aplicar morfología para limpiar
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    # Limpieza sutil con morfología
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
     clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
     
     return clean
