@@ -6,8 +6,13 @@ import numpy as np
 import io
 from PIL import Image
 import pytesseract
+from paddleocr import PaddleOCR
+import time
 
 app = FastAPI()
+
+# Inicializar PaddleOCR (una sola vez al arrancar)
+paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es', use_gpu=False)
 
 def preprocess_image_np(img):
     """Función reutilizable para preprocesar imagen"""
@@ -133,6 +138,102 @@ async def ocr_complete(file: UploadFile = File(...), lang: str = "spa"):
         "words_count": len([w for w in data['text'] if w.strip()]) if data['text'] else 0,
         "language": lang,
         "processing_time": "~2-5 seconds"
+    })
+
+@app.post("/ocr-paddle")
+async def ocr_paddle(file: UploadFile = File(...)):
+    """OCR usando PaddleOCR (sin preprocesado)"""
+    
+    start_time = time.time()
+    
+    # 1) Leer imagen en memoria
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # 2) OCR con PaddleOCR
+    results = paddle_ocr.ocr(img, cls=True)
+    
+    # 3) Extraer texto y métricas
+    text = ""
+    confidence_scores = []
+    word_count = 0
+    
+    if results and results[0]:
+        for line in results[0]:
+            if line:
+                text += line[1][0] + " "
+                confidence_scores.append(line[1][1])
+                word_count += 1
+    
+    processing_time = time.time() - start_time
+    
+    return JSONResponse({
+        "success": True,
+        "text": text.strip(),
+        "confidence": float(np.mean(confidence_scores)) if confidence_scores else 0.0,
+        "words_count": word_count,
+        "processing_time": f"{processing_time:.2f} seconds",
+        "engine": "PaddleOCR"
+    })
+
+@app.post("/ocr-comparison")
+async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
+    """Compara resultados de Tesseract vs PaddleOCR"""
+    
+    # 1) Leer imagen en memoria
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # 2) Tesseract con preprocesado
+    tesseract_start = time.time()
+    processed = preprocess_image_np(img)
+    config = "--oem 1 --psm 3"
+    tesseract_text = pytesseract.image_to_string(processed, lang=lang, config=config)
+    tesseract_data = pytesseract.image_to_data(
+        processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
+    )
+    tesseract_time = time.time() - tesseract_start
+    tesseract_confidence = float(np.mean(tesseract_data['conf'])) if tesseract_data['conf'] else 0.0
+
+    # 3) PaddleOCR sin preprocesado
+    paddle_start = time.time()
+    paddle_results = paddle_ocr.ocr(img, cls=True)
+    paddle_time = time.time() - paddle_start
+    
+    paddle_text = ""
+    paddle_confidence_scores = []
+    if paddle_results and paddle_results[0]:
+        for line in paddle_results[0]:
+            if line:
+                paddle_text += line[1][0] + " "
+                paddle_confidence_scores.append(line[1][1])
+    
+    paddle_confidence = float(np.mean(paddle_confidence_scores)) if paddle_confidence_scores else 0.0
+
+    return JSONResponse({
+        "comparison": {
+            "tesseract": {
+                "text": tesseract_text.strip(),
+                "confidence": tesseract_confidence,
+                "processing_time": f"{tesseract_time:.2f}s",
+                "words_count": len([w for w in tesseract_data['text'] if w.strip()]) if tesseract_data['text'] else 0,
+                "preprocessing": "Applied"
+            },
+            "paddleocr": {
+                "text": paddle_text.strip(),
+                "confidence": paddle_confidence,
+                "processing_time": f"{paddle_time:.2f}s",
+                "words_count": len(paddle_confidence_scores),
+                "preprocessing": "None"
+            }
+        },
+        "recommendation": "PaddleOCR" if paddle_confidence > tesseract_confidence else "Tesseract"
     })
 
 if __name__ == "__main__":

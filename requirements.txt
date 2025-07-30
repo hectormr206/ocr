@@ -4,4 +4,6 @@ opencv-python-headless
 numpy
 pytesseract
 Pillow
-python-multipart 
+python-multipart
+paddlepaddle
+paddleocr 
