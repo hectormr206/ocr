@@ -163,7 +163,7 @@ def preprocess_image_np(img):
     # Binarización más suave
     _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    return binary
+    return binary, rotation_angle
 
 @app.post("/process-image")
 async def process_image(file: UploadFile = File(...)):
