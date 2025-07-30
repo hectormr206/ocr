@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["tesseract", "tesseract-data-spa", "opencv", "libgl1-mesa-glx"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[phases.build]
+cmds = ["echo 'Build complete'"]
+
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT" 
