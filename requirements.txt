@@ -6,4 +6,6 @@ pytesseract
 Pillow
 python-multipart
 paddlepaddle
-paddleocr 
+paddleocr
+python-doctr
+layoutparser 

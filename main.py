@@ -8,11 +8,25 @@ from PIL import Image
 import pytesseract
 from paddleocr import PaddleOCR
 import time
+from doctr.io import DocumentFile
+from doctr.models import ocr_predictor
+import layoutparser as lp
 
 app = FastAPI()
 
-# Inicializar PaddleOCR (una sola vez al arrancar)
+# Inicializar OCR engines (una sola vez al arrancar)
 paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es')
+
+# Inicializar DocTR
+doctr_predictor = ocr_predictor(pretrained=True)
+
+# Inicializar LayoutParser
+layout_model = lp.PaddleDetectionLayoutModel(
+    config_path='lp://PubLayNet/ppyolov2_r50vd_dcn_365e',
+    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"},
+    threshold=0.5,
+    enable_mkldnn=True
+)
 
 def preprocess_image_np(img):
     """Función reutilizable para preprocesar imagen - Versión mejorada"""
@@ -192,9 +206,11 @@ async def ocr_paddle(file: UploadFile = File(...)):
         "engine": "PaddleOCR"
     })
 
-@app.post("/ocr-comparison")
-async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
-    """Compara resultados de Tesseract vs PaddleOCR"""
+@app.post("/ocr-doctr")
+async def ocr_doctr(file: UploadFile = File(...)):
+    """OCR usando DocTR (Document Text Recognition)"""
+    
+    start_time = time.time()
     
     # 1) Leer imagen en memoria
     contents = await file.read()
@@ -203,56 +219,247 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
+    # 2) OCR con DocTR
+    try:
+        # Convertir a PIL Image para DocTR
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        doc = DocumentFile.from_images([pil_img])
+        result = doctr_predictor(doc)
+        
+        # Extraer texto y métricas
+        text = ""
+        confidence_scores = []
+        word_count = 0
+        
+        for page in result.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    for word in line.words:
+                        text += word.value + " "
+                        confidence_scores.append(word.confidence)
+                        word_count += 1
+        
+        processing_time = time.time() - start_time
+        
+        return JSONResponse({
+            "success": True,
+            "text": text.strip(),
+            "confidence": float(np.mean(confidence_scores)) if confidence_scores else 0.0,
+            "words_count": word_count,
+            "processing_time": f"{processing_time:.2f} seconds",
+            "engine": "DocTR"
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DocTR error: {str(e)}")
+
+@app.post("/ocr-layout")
+async def ocr_layout(file: UploadFile = File(...)):
+    """OCR usando LayoutParser + PaddleOCR"""
+    
+    start_time = time.time()
+    
+    # 1) Leer imagen en memoria
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # 2) Layout detection con LayoutParser
+    try:
+        # Detectar layout
+        layout = layout_model.detect(img)
+        
+        # OCR en cada región de texto
+        text = ""
+        confidence_scores = []
+        word_count = 0
+        
+        for block in layout:
+            if block.type == "Text" or block.type == "Title":
+                # Recortar región
+                x1, y1, x2, y2 = int(block.block.coordinates[0]), int(block.block.coordinates[1]), int(block.block.coordinates[2]), int(block.block.coordinates[3])
+                roi = img[y1:y2, x1:x2]
+                
+                if roi.size > 0:
+                    # OCR en la región
+                    ocr_result = paddle_ocr.ocr(roi)
+                    if ocr_result and ocr_result[0]:
+                        for line in ocr_result[0]:
+                            if line and len(line) >= 2:
+                                if isinstance(line[1], list) and len(line[1]) >= 2:
+                                    text += line[1][0] + " "
+                                    confidence_scores.append(line[1][1])
+                                    word_count += 1
+                                elif isinstance(line[1], str):
+                                    text += line[1] + " "
+                                    confidence_scores.append(0.0)
+                                    word_count += 1
+        
+        processing_time = time.time() - start_time
+        
+        return JSONResponse({
+            "success": True,
+            "text": text.strip(),
+            "confidence": float(np.mean(confidence_scores)) if confidence_scores else 0.0,
+            "words_count": word_count,
+            "processing_time": f"{processing_time:.2f} seconds",
+            "engine": "LayoutParser + PaddleOCR",
+            "layout_blocks": len(layout)
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LayoutParser error: {str(e)}")
+
+@app.post("/ocr-comparison")
+async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
+    """Compara resultados de Tesseract vs PaddleOCR vs DocTR vs LayoutParser"""
+    
+    # 1) Leer imagen en memoria
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    results = {}
+    
     # 2) Tesseract con preprocesado optimizado
-    tesseract_start = time.time()
-    processed = preprocess_image_np(img)
-    config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
-    tesseract_text = pytesseract.image_to_string(processed, lang=lang, config=config)
-    tesseract_data = pytesseract.image_to_data(
-        processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
-    )
-    tesseract_time = time.time() - tesseract_start
-    tesseract_confidence = float(np.mean(tesseract_data['conf'])) if tesseract_data['conf'] else 0.0
+    try:
+        tesseract_start = time.time()
+        processed = preprocess_image_np(img)
+        config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
+        tesseract_text = pytesseract.image_to_string(processed, lang=lang, config=config)
+        tesseract_data = pytesseract.image_to_data(
+            processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
+        )
+        tesseract_time = time.time() - tesseract_start
+        tesseract_confidence = float(np.mean(tesseract_data['conf'])) if tesseract_data['conf'] else 0.0
+        
+        results["tesseract"] = {
+            "text": tesseract_text.strip(),
+            "confidence": tesseract_confidence,
+            "processing_time": f"{tesseract_time:.2f}s",
+            "words_count": len([w for w in tesseract_data['text'] if w.strip()]) if tesseract_data['text'] else 0,
+            "preprocessing": "Applied"
+        }
+    except Exception as e:
+        results["tesseract"] = {"error": str(e)}
 
     # 3) PaddleOCR sin preprocesado
-    paddle_start = time.time()
-    paddle_results = paddle_ocr.ocr(img)
-    paddle_time = time.time() - paddle_start
-    
-    paddle_text = ""
-    paddle_confidence_scores = []
-    if paddle_results and paddle_results[0]:
-        for line in paddle_results[0]:
-            if line and len(line) >= 2:
-                # line[1] contiene [texto, confianza]
-                if isinstance(line[1], list) and len(line[1]) >= 2:
-                    paddle_text += line[1][0] + " "
-                    paddle_confidence_scores.append(line[1][1])
-                elif isinstance(line[1], str):
-                    # Si solo hay texto sin confianza
-                    paddle_text += line[1] + " "
-                    paddle_confidence_scores.append(0.0)
-    
-    paddle_confidence = float(np.mean(paddle_confidence_scores)) if paddle_confidence_scores else 0.0
+    try:
+        paddle_start = time.time()
+        paddle_results = paddle_ocr.ocr(img)
+        paddle_time = time.time() - paddle_start
+        
+        paddle_text = ""
+        paddle_confidence_scores = []
+        if paddle_results and paddle_results[0]:
+            for line in paddle_results[0]:
+                if line and len(line) >= 2:
+                    if isinstance(line[1], list) and len(line[1]) >= 2:
+                        paddle_text += line[1][0] + " "
+                        paddle_confidence_scores.append(line[1][1])
+                    elif isinstance(line[1], str):
+                        paddle_text += line[1] + " "
+                        paddle_confidence_scores.append(0.0)
+        
+        paddle_confidence = float(np.mean(paddle_confidence_scores)) if paddle_confidence_scores else 0.0
+        
+        results["paddleocr"] = {
+            "text": paddle_text.strip(),
+            "confidence": paddle_confidence,
+            "processing_time": f"{paddle_time:.2f}s",
+            "words_count": len(paddle_confidence_scores),
+            "preprocessing": "None"
+        }
+    except Exception as e:
+        results["paddleocr"] = {"error": str(e)}
+
+    # 4) DocTR
+    try:
+        doctr_start = time.time()
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        doc = DocumentFile.from_images([pil_img])
+        doctr_result = doctr_predictor(doc)
+        
+        doctr_text = ""
+        doctr_confidence_scores = []
+        doctr_word_count = 0
+        
+        for page in doctr_result.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    for word in line.words:
+                        doctr_text += word.value + " "
+                        doctr_confidence_scores.append(word.confidence)
+                        doctr_word_count += 1
+        
+        doctr_time = time.time() - doctr_start
+        doctr_confidence = float(np.mean(doctr_confidence_scores)) if doctr_confidence_scores else 0.0
+        
+        results["doctr"] = {
+            "text": doctr_text.strip(),
+            "confidence": doctr_confidence,
+            "processing_time": f"{doctr_time:.2f}s",
+            "words_count": doctr_word_count,
+            "preprocessing": "None"
+        }
+    except Exception as e:
+        results["doctr"] = {"error": str(e)}
+
+    # 5) LayoutParser + PaddleOCR
+    try:
+        layout_start = time.time()
+        layout = layout_model.detect(img)
+        
+        layout_text = ""
+        layout_confidence_scores = []
+        layout_word_count = 0
+        
+        for block in layout:
+            if block.type == "Text" or block.type == "Title":
+                x1, y1, x2, y2 = int(block.block.coordinates[0]), int(block.block.coordinates[1]), int(block.block.coordinates[2]), int(block.block.coordinates[3])
+                roi = img[y1:y2, x1:x2]
+                
+                if roi.size > 0:
+                    ocr_result = paddle_ocr.ocr(roi)
+                    if ocr_result and ocr_result[0]:
+                        for line in ocr_result[0]:
+                            if line and len(line) >= 2:
+                                if isinstance(line[1], list) and len(line[1]) >= 2:
+                                    layout_text += line[1][0] + " "
+                                    layout_confidence_scores.append(line[1][1])
+                                    layout_word_count += 1
+                                elif isinstance(line[1], str):
+                                    layout_text += line[1] + " "
+                                    layout_confidence_scores.append(0.0)
+                                    layout_word_count += 1
+        
+        layout_time = time.time() - layout_start
+        layout_confidence = float(np.mean(layout_confidence_scores)) if layout_confidence_scores else 0.0
+        
+        results["layoutparser"] = {
+            "text": layout_text.strip(),
+            "confidence": layout_confidence,
+            "processing_time": f"{layout_time:.2f}s",
+            "words_count": layout_word_count,
+            "preprocessing": "Layout Detection",
+            "layout_blocks": len(layout)
+        }
+    except Exception as e:
+        results["layoutparser"] = {"error": str(e)}
+
+    # 6) Determinar recomendación
+    valid_results = {k: v for k, v in results.items() if "error" not in v}
+    if valid_results:
+        best_engine = max(valid_results.keys(), key=lambda x: valid_results[x].get("confidence", 0))
+        recommendation = best_engine
+    else:
+        recommendation = "None"
 
     return JSONResponse({
-        "comparison": {
-            "tesseract": {
-                "text": tesseract_text.strip(),
-                "confidence": tesseract_confidence,
-                "processing_time": f"{tesseract_time:.2f}s",
-                "words_count": len([w for w in tesseract_data['text'] if w.strip()]) if tesseract_data['text'] else 0,
-                "preprocessing": "Applied"
-            },
-            "paddleocr": {
-                "text": paddle_text.strip(),
-                "confidence": paddle_confidence,
-                "processing_time": f"{paddle_time:.2f}s",
-                "words_count": len(paddle_confidence_scores),
-                "preprocessing": "None"
-            }
-        },
-        "recommendation": "PaddleOCR" if paddle_confidence > tesseract_confidence else "Tesseract"
+        "comparison": results,
+        "recommendation": recommendation
     })
 
 if __name__ == "__main__":
