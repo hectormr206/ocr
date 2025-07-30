@@ -28,8 +28,89 @@ layout_model = lp.PaddleDetectionLayoutModel(
     enable_mkldnn=True
 )
 
+def auto_rotate_image(img):
+    """Detecta y corrige la orientación de la imagen automáticamente"""
+    
+    # Convertir a escala de grises
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Detectar texto usando Tesseract
+    try:
+        # Probar diferentes ángulos
+        angles = [0, 90, 180, 270]
+        best_angle = 0
+        best_confidence = 0
+        
+        for angle in angles:
+            # Rotar imagen
+            h, w = gray.shape
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC)
+            
+            # OCR en la imagen rotada
+            config = "--oem 1 --psm 0"  # PSM 0 para detección de orientación
+            result = pytesseract.image_to_osd(rotated, config=config)
+            
+            # Extraer confianza del resultado
+            confidence = float(result.split('\n')[1].split(':')[1])
+            
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_angle = angle
+        
+        # Aplicar la mejor rotación
+        if best_angle != 0:
+            h, w = img.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, best_angle, 1.0)
+            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC)
+            
+        return img, best_angle
+        
+    except Exception as e:
+        # Si falla, usar método alternativo basado en contornos
+        return auto_rotate_contour_based(img)
+
+def auto_rotate_contour_based(img):
+    """Método alternativo basado en contornos para rotación"""
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Detectar contornos de texto
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        # Encontrar el contorno más grande (probablemente texto)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Calcular el ángulo del rectángulo mínimo
+        rect = cv2.minAreaRect(largest_contour)
+        angle = rect[2]
+        
+        # Corregir ángulo
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+        
+        # Aplicar rotación si es significativa
+        if abs(angle) > 2:
+            h, w = img.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC)
+            
+        return img, angle
+    
+    return img, 0
+
 def preprocess_image_np(img):
     """Función reutilizable para preprocesar imagen - Versión mejorada"""
+    # 0) Auto-rotación inteligente
+    img, rotation_angle = auto_rotate_image(img)
+    
     # 1) Deskew (rotación automática) - Solo si es necesario
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     coords = np.column_stack(np.where(gray < 200))
@@ -97,11 +178,22 @@ async def process_image(file: UploadFile = File(...)):
     # Preprocesar imagen
     clean = preprocess_image_np(img)
 
-    # Enviar imagen como PNG en la respuesta
+    # Enviar imagen como PNG en la respuesta con información de rotación
     is_success, buffer = cv2.imencode('.png', clean)
     if not is_success:
         raise HTTPException(status_code=500, detail="Image encoding failed")
-    return StreamingResponse(io.BytesIO(buffer.tobytes()), media_type="image/png")
+    
+    # Agregar headers con información de rotación
+    headers = {
+        "X-Image-Rotated": "true" if rotation_angle != 0 else "false",
+        "X-Rotation-Angle": str(rotation_angle)
+    }
+    
+    return StreamingResponse(
+        io.BytesIO(buffer.tobytes()), 
+        media_type="image/png",
+        headers=headers
+    )
 
 @app.post("/ocr-text")
 async def ocr_text(file: UploadFile = File(...), lang: str = "spa"):
@@ -110,8 +202,8 @@ async def ocr_text(file: UploadFile = File(...), lang: str = "spa"):
     pil = Image.open(io.BytesIO(contents)).convert("RGB")
     img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    # 2) Preprocesado (deskew, warp, binarización)
-    processed = preprocess_image_np(img)
+    # 2) Preprocesado (auto-rotación, deskew, warp, binarización)
+    processed, rotation_angle = preprocess_image_np(img)
 
     # 3) OCR con Tesseract optimizado para documentos
     config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
@@ -140,8 +232,8 @@ async def ocr_complete(file: UploadFile = File(...), lang: str = "spa"):
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # 2) Preprocesar imagen
-    processed = preprocess_image_np(img)
+    # 2) Preprocesar imagen (con auto-rotación)
+    processed, rotation_angle = preprocess_image_np(img)
 
     # 3) OCR con Tesseract optimizado para documentos
     config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
@@ -340,7 +432,9 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
             "confidence": tesseract_confidence,
             "processing_time": f"{tesseract_time:.2f}s",
             "words_count": len([w for w in tesseract_data['text'] if w.strip()]) if tesseract_data['text'] else 0,
-            "preprocessing": "Applied"
+            "preprocessing": "Applied",
+            "rotation_applied": rotation_angle != 0,
+            "rotation_angle": rotation_angle
         }
     except Exception as e:
         results["tesseract"] = {"error": str(e)}
