@@ -163,10 +163,17 @@ async def ocr_paddle(file: UploadFile = File(...)):
     
     if results and results[0]:
         for line in results[0]:
-            if line:
-                text += line[1][0] + " "
-                confidence_scores.append(line[1][1])
-                word_count += 1
+            if line and len(line) >= 2:
+                # line[1] contiene [texto, confianza]
+                if isinstance(line[1], list) and len(line[1]) >= 2:
+                    text += line[1][0] + " "
+                    confidence_scores.append(line[1][1])
+                    word_count += 1
+                elif isinstance(line[1], str):
+                    # Si solo hay texto sin confianza
+                    text += line[1] + " "
+                    confidence_scores.append(0.0)
+                    word_count += 1
     
     processing_time = time.time() - start_time
     
@@ -210,9 +217,15 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
     paddle_confidence_scores = []
     if paddle_results and paddle_results[0]:
         for line in paddle_results[0]:
-            if line:
-                paddle_text += line[1][0] + " "
-                paddle_confidence_scores.append(line[1][1])
+            if line and len(line) >= 2:
+                # line[1] contiene [texto, confianza]
+                if isinstance(line[1], list) and len(line[1]) >= 2:
+                    paddle_text += line[1][0] + " "
+                    paddle_confidence_scores.append(line[1][1])
+                elif isinstance(line[1], str):
+                    # Si solo hay texto sin confianza
+                    paddle_text += line[1] + " "
+                    paddle_confidence_scores.append(0.0)
     
     paddle_confidence = float(np.mean(paddle_confidence_scores)) if paddle_confidence_scores else 0.0
 
