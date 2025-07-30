@@ -15,55 +15,61 @@ app = FastAPI()
 paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es')
 
 def preprocess_image_np(img):
-    """Función reutilizable para preprocesar imagen"""
-    # 1) Deskew (rotación automática)
+    """Función reutilizable para preprocesar imagen - Versión mejorada"""
+    # 1) Deskew (rotación automática) - Solo si es necesario
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     coords = np.column_stack(np.where(gray < 200))
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    (h, w) = img.shape[:2]
-    M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    deskew = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC,
-                             borderMode=cv2.BORDER_REPLICATE)
+    
+    if len(coords) > 100:  # Solo si hay suficiente contenido
+        angle = cv2.minAreaRect(coords)[-1]
+        if abs(angle) > 2:  # Solo rotar si el ángulo es significativo
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+            (h, w) = img.shape[:2]
+            M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC,
+                                 borderMode=cv2.BORDER_REPLICATE)
 
-    # 2) Perspective warp (si detecta un contorno cuadrado)
-    gray2 = cv2.cvtColor(deskew, cv2.COLOR_BGR2GRAY)
+    # 2) Perspective warp - Solo si detecta documento rectangular
+    gray2 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray2, (5, 5), 0)
     thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     if contours:
         cnt = max(contours, key=cv2.contourArea)
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) == 4:
-            pts = np.float32([c[0] for c in approx])
-            (tl, tr, br, bl) = pts[np.argsort(pts[:,1])]
-            width = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
-            height = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
-            dst = np.float32([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
-            M2 = cv2.getPerspectiveTransform(pts, dst)
-            warped = cv2.warpPerspective(deskew, M2, (width, height))
-        else:
-            warped = deskew
-    else:
-        warped = deskew
+        area = cv2.contourArea(cnt)
+        img_area = img.shape[0] * img.shape[1]
+        
+        # Solo aplicar warp si el contorno es significativo
+        if area > img_area * 0.3:  # Al menos 30% del área
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            if len(approx) == 4:
+                pts = np.float32([c[0] for c in approx])
+                (tl, tr, br, bl) = pts[np.argsort(pts[:,1])]
+                width = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
+                height = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
+                dst = np.float32([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
+                M2 = cv2.getPerspectiveTransform(pts, dst)
+                img = cv2.warpPerspective(img, M2, (width, height))
 
-    # 3) Binarización optimizada para OCR
-    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    # 3) Mejora de contraste sin binarización agresiva
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Binarización adaptativa con parámetros optimizados
-    clean = cv2.adaptiveThreshold(warped_gray, 255,
-                                  cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, 25, 10)
+    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
     
-    # Limpieza sutil con morfología
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
+    # Reducción de ruido suave
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
     
-    return clean
+    # Binarización más suave
+    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    return binary
 
 @app.post("/process-image")
 async def process_image(file: UploadFile = File(...)):
@@ -93,8 +99,8 @@ async def ocr_text(file: UploadFile = File(...), lang: str = "spa"):
     # 2) Preprocesado (deskew, warp, binarización)
     processed = preprocess_image_np(img)
 
-    # 3) OCR con Tesseract LSTM (--oem 1) y PSM automático (--psm 3)
-    config = "--oem 1 --psm 3"
+    # 3) OCR con Tesseract optimizado para documentos
+    config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
     text = pytesseract.image_to_string(processed, lang=lang, config=config)
     data = pytesseract.image_to_data(
         processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
@@ -123,8 +129,8 @@ async def ocr_complete(file: UploadFile = File(...), lang: str = "spa"):
     # 2) Preprocesar imagen
     processed = preprocess_image_np(img)
 
-    # 3) OCR con Tesseract
-    config = "--oem 1 --psm 3"
+    # 3) OCR con Tesseract optimizado para documentos
+    config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
     text = pytesseract.image_to_string(processed, lang=lang, config=config)
     data = pytesseract.image_to_data(
         processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
@@ -142,7 +148,7 @@ async def ocr_complete(file: UploadFile = File(...), lang: str = "spa"):
 
 @app.post("/ocr-paddle")
 async def ocr_paddle(file: UploadFile = File(...)):
-    """OCR usando PaddleOCR (sin preprocesado)"""
+    """OCR usando PaddleOCR (con preprocesado opcional)"""
     
     start_time = time.time()
     
@@ -197,10 +203,10 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # 2) Tesseract con preprocesado
+    # 2) Tesseract con preprocesado optimizado
     tesseract_start = time.time()
     processed = preprocess_image_np(img)
-    config = "--oem 1 --psm 3"
+    config = "--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñÁÉÍÓÚÑ.,;:()$%&@#!?-_+=/ "
     tesseract_text = pytesseract.image_to_string(processed, lang=lang, config=config)
     tesseract_data = pytesseract.image_to_data(
         processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
