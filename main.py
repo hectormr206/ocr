@@ -12,7 +12,7 @@ import time
 app = FastAPI()
 
 # Inicializar PaddleOCR (una sola vez al arrancar)
-paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es', use_gpu=False)
+paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es')
 
 def preprocess_image_np(img):
     """Función reutilizable para preprocesar imagen"""
