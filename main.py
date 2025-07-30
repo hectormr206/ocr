@@ -24,7 +24,6 @@ doctr_predictor = ocr_predictor(pretrained=True)
 layout_model = lp.PaddleDetectionLayoutModel(
     config_path='lp://PubLayNet/ppyolov2_r50vd_dcn_365e',
     label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"},
-    threshold=0.5,
     enable_mkldnn=True
 )
 
