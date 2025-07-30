@@ -46,11 +46,20 @@ def preprocess_image_np(img):
     else:
         warped = deskew
 
-    # 3) Binarización para OCR
+    # 3) Binarización mejorada para OCR
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-    clean = cv2.adaptiveThreshold(warped_gray, 255,
-                                  cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, 35, 15)
+    
+    # Aplicar filtro de ruido
+    denoised = cv2.fastNlMeansDenoising(warped_gray)
+    
+    # Binarización adaptativa mejorada
+    clean = cv2.adaptiveThreshold(denoised, 255,
+                                  cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY, 21, 11)
+    
+    # Aplicar morfología para limpiar
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
     
     return clean
 
@@ -90,7 +99,44 @@ async def ocr_text(file: UploadFile = File(...), lang: str = "spa"):
     )
 
     # 4) Devolver JSON con texto completo y datos por palabra
-    return JSONResponse({"text": text, "data": data})
+    return JSONResponse({
+        "text": text,
+        "data": data,
+        "confidence": float(np.mean(data['conf'])) if data['conf'] else 0.0,
+        "words_count": len(data['text']) if data['text'] else 0,
+        "language": lang
+    })
+
+@app.post("/ocr-complete")
+async def ocr_complete(file: UploadFile = File(...), lang: str = "spa"):
+    """Procesa imagen y extrae texto en un solo paso (similar a OCR.space)"""
+    
+    # 1) Leer imagen en memoria
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # 2) Preprocesar imagen
+    processed = preprocess_image_np(img)
+
+    # 3) OCR con Tesseract
+    config = "--oem 1 --psm 3"
+    text = pytesseract.image_to_string(processed, lang=lang, config=config)
+    data = pytesseract.image_to_data(
+        processed, lang=lang, config=config, output_type=pytesseract.Output.DICT
+    )
+
+    # 4) Devolver resultado completo
+    return JSONResponse({
+        "success": True,
+        "text": text.strip(),
+        "confidence": float(np.mean(data['conf'])) if data['conf'] else 0.0,
+        "words_count": len([w for w in data['text'] if w.strip()]) if data['text'] else 0,
+        "language": lang,
+        "processing_time": "~2-5 seconds"
+    })
 
 if __name__ == "__main__":
     import os
