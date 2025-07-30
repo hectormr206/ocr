@@ -20,11 +20,12 @@ paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es')
 # Inicializar DocTR
 doctr_predictor = ocr_predictor(pretrained=True)
 
-# Inicializar LayoutParser
-layout_model = lp.PaddleDetectionLayoutModel(
-    config_path='lp://PubLayNet/ppyolov2_r50vd_dcn_365e',
-    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
-)
+# Inicializar LayoutParser (comentado por incompatibilidad)
+# layout_model = lp.PaddleDetectionLayoutModel(
+#     config_path='lp://PubLayNet/ppyolov2_r50vd_dcn_365e',
+#     label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
+# )
+layout_model = None
 
 def auto_rotate_image(img):
     """Detecta y corrige la orientación de la imagen automáticamente"""
@@ -344,61 +345,20 @@ async def ocr_doctr(file: UploadFile = File(...)):
 
 @app.post("/ocr-layout")
 async def ocr_layout(file: UploadFile = File(...)):
-    """OCR usando LayoutParser + PaddleOCR"""
+    """OCR usando LayoutParser + PaddleOCR (temporalmente deshabilitado)"""
     
-    start_time = time.time()
-    
-    # 1) Leer imagen en memoria
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-
-    # 2) Layout detection con LayoutParser
-    try:
-        # Detectar layout
-        layout = layout_model.detect(img)
-        
-        # OCR en cada región de texto
-        text = ""
-        confidence_scores = []
-        word_count = 0
-        
-        for block in layout:
-            if block.type == "Text" or block.type == "Title":
-                # Recortar región
-                x1, y1, x2, y2 = int(block.block.coordinates[0]), int(block.block.coordinates[1]), int(block.block.coordinates[2]), int(block.block.coordinates[3])
-                roi = img[y1:y2, x1:x2]
-                
-                if roi.size > 0:
-                    # OCR en la región
-                    ocr_result = paddle_ocr.ocr(roi)
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            if line and len(line) >= 2:
-                                if isinstance(line[1], list) and len(line[1]) >= 2:
-                                    text += line[1][0] + " "
-                                    confidence_scores.append(line[1][1])
-                                    word_count += 1
-                                elif isinstance(line[1], str):
-                                    text += line[1] + " "
-                                    confidence_scores.append(0.0)
-                                    word_count += 1
-        
-        processing_time = time.time() - start_time
-        
-        return JSONResponse({
-            "success": True,
-            "text": text.strip(),
-            "confidence": float(np.mean(confidence_scores)) if confidence_scores else 0.0,
-            "words_count": word_count,
-            "processing_time": f"{processing_time:.2f} seconds",
-            "engine": "LayoutParser + PaddleOCR",
-            "layout_blocks": len(layout)
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LayoutParser error: {str(e)}")
+    return JSONResponse({
+        "success": False,
+        "error": "LayoutParser temporarily disabled due to PaddlePaddle compatibility issues",
+        "message": "Please use /ocr-paddle or /ocr-doctr instead",
+        "available_endpoints": [
+            "/ocr-text",
+            "/ocr-complete", 
+            "/ocr-paddle",
+            "/ocr-doctr",
+            "/ocr-comparison"
+        ]
+    })
 
 @app.post("/ocr-comparison")
 async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
@@ -499,47 +459,15 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
     except Exception as e:
         results["doctr"] = {"error": str(e)}
 
-    # 5) LayoutParser + PaddleOCR
-    try:
-        layout_start = time.time()
-        layout = layout_model.detect(img)
-        
-        layout_text = ""
-        layout_confidence_scores = []
-        layout_word_count = 0
-        
-        for block in layout:
-            if block.type == "Text" or block.type == "Title":
-                x1, y1, x2, y2 = int(block.block.coordinates[0]), int(block.block.coordinates[1]), int(block.block.coordinates[2]), int(block.block.coordinates[3])
-                roi = img[y1:y2, x1:x2]
-                
-                if roi.size > 0:
-                    ocr_result = paddle_ocr.ocr(roi)
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            if line and len(line) >= 2:
-                                if isinstance(line[1], list) and len(line[1]) >= 2:
-                                    layout_text += line[1][0] + " "
-                                    layout_confidence_scores.append(line[1][1])
-                                    layout_word_count += 1
-                                elif isinstance(line[1], str):
-                                    layout_text += line[1] + " "
-                                    layout_confidence_scores.append(0.0)
-                                    layout_word_count += 1
-        
-        layout_time = time.time() - layout_start
-        layout_confidence = float(np.mean(layout_confidence_scores)) if layout_confidence_scores else 0.0
-        
-        results["layoutparser"] = {
-            "text": layout_text.strip(),
-            "confidence": layout_confidence,
-            "processing_time": f"{layout_time:.2f}s",
-            "words_count": layout_word_count,
-            "preprocessing": "Layout Detection",
-            "layout_blocks": len(layout)
-        }
-    except Exception as e:
-        results["layoutparser"] = {"error": str(e)}
+    # 5) LayoutParser + PaddleOCR (temporalmente deshabilitado)
+    results["layoutparser"] = {
+        "text": "LayoutParser temporarily disabled",
+        "confidence": 0.0,
+        "processing_time": "0.00s",
+        "words_count": 0,
+        "preprocessing": "Disabled",
+        "error": "PaddlePaddle compatibility issue"
+    }
 
     # 6) Determinar recomendación
     valid_results = {k: v for k, v in results.items() if "error" not in v}
