@@ -154,7 +154,7 @@ async def ocr_paddle(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid image file")
 
     # 2) OCR con PaddleOCR
-    results = paddle_ocr.ocr(img, cls=True)
+    results = paddle_ocr.ocr(img)
     
     # 3) Extraer texto y métricas
     text = ""
@@ -203,7 +203,7 @@ async def ocr_comparison(file: UploadFile = File(...), lang: str = "spa"):
 
     # 3) PaddleOCR sin preprocesado
     paddle_start = time.time()
-    paddle_results = paddle_ocr.ocr(img, cls=True)
+    paddle_results = paddle_ocr.ocr(img)
     paddle_time = time.time() - paddle_start
     
     paddle_text = ""
